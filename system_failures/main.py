@@ -1,6 +1,5 @@
 import os
 import logging
-
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship, sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
@@ -19,13 +18,15 @@ FAILURE = 'failure'
 SUCCESS = 'success'
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
 logger = logging.getLogger()
 
-engine = create_engine(DATABASE_URL, echo=False)
-
-Base = declarative_base()
-
+try:
+    engine = create_engine(DATABASE_URL, echo=False, pool_size=10, max_overflow=20)
+    Base = declarative_base()
+    Session = sessionmaker(bind=engine)
+except Exception as e:
+    logger.error(f'Error connecting to the database: {e}')
+    raise
 
 class Customer(Base):
     __tablename__ = 'customers'
@@ -35,7 +36,6 @@ class Customer(Base):
     last_name = Column(String(MAX_64))
 
     campaigns = relationship('Campaign', back_populates='customer')
-
 
 class Campaign(Base):
     __tablename__ = 'campaigns'
@@ -47,7 +47,6 @@ class Campaign(Base):
     customer = relationship('Customer', back_populates='campaigns')
     events = relationship('Event', back_populates='campaign')
 
-
 class Event(Base):
     __tablename__ = 'events'
 
@@ -57,13 +56,7 @@ class Event(Base):
 
     campaign = relationship('Campaign', back_populates='events')
 
-Session = sessionmaker(bind=engine)
-session = Session()
-
-
-if not inspect(engine).has_table('customers'):
-    Base.metadata.create_all(engine)
-
+def create_sample_data(session):
     customer1 = Customer(id=1, first_name='Whitney', last_name='Ferrero')
     customer2 = Customer(id=2, first_name='Dickie', last_name='Romera')
 
@@ -102,18 +95,24 @@ if not inspect(engine).has_table('customers'):
     session.add_all([customer1, customer2, campaign1, campaign2, campaign3, campaign4, campaign5])
     session.commit()
 
+def query_failed_events():
+    with Session() as session:
+        results = (
+            session.query(Customer.first_name, Customer.last_name, func.count(Event.status).label('failures'))
+                .join(Customer.campaigns)
+                .join(Campaign.events)
+                .filter(Event.status == FAILURE)
+                .group_by(Customer.id, Customer.first_name, Customer.last_name)
+                .having(func.count(Event.status) > 3)
+                .all()
+        )
+        for first_name, last_name, failures in results:
+            logger.info(f'{first_name} {last_name} {failures}')
 
-results = (
-    session.query(Customer.first_name, Customer.last_name, func.count(Event.status).label('failures'))
-        .join(Customer.campaigns)
-        .join(Campaign.events)
-        .filter(Event.status == FAILURE)
-        .group_by(Customer.id, Customer.first_name, Customer.last_name)
-        .having(func.count(Event.status) > 3)
-        .all()
-)
-
-for first_name, last_name, failures in results:
-    logger.info(f'{first_name} {last_name} {failures}')
-
-session.close()
+if __name__ == "__main__":
+    if not inspect(engine).has_table('customers'):
+        with Session() as session:
+            Base.metadata.create_all(engine)
+            create_sample_data(session)
+    
+    query_failed_events()
